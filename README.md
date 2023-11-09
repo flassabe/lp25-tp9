@@ -2,7 +2,7 @@
 
 Dans ce TP, l'objectif est d'écrire des programmes capables d'interagir avec le système ou entre eux.
 
-Nous y verrons notamment la lecture de données envoyées au proggramme par un `pipe`, l'interception de signaux destinés au programme, l'utilisation des FIFO, et le multiplexages sur des entrées multiples.
+Nous y verrons notamment la lecture de données envoyées au programme par un `pipe`, l'interception de signaux destinés au programme, l'utilisation des FIFO, et le multiplexages sur des entrées multiples.
 
 ## Ouvrir la sortir d'un pipe depuis un programme
 
@@ -153,74 +153,89 @@ Ensuite, dans la boucle, nous allons utiliser `read` et n'afficher un résultat 
 
 Écrire un programmé nommé `multiplexage-polling.c` qui met en application le polling et testez le en envoyant des données dans les FIFO avec des ordres différents pour vous assurer que cela fonctionne. Puis, regardez la charge CPU du programme (commande bash `top`, puis appui sur la touche `c` pour classer par occupation du CPU de la plus forte à la plus faible). Que remarquez vous ? Est-ce intéressant ?
 
-### 5.4 Multiplexage avec `select`
+### 5.4 Multiplexage avec `poll`
 
-Pour résoudre le problème de multiplexage et de charge CPU, nous allons utiliser la fonction `select` qui permet de scruter plusieurs descripteurs et de retourner quand un descripteur (ou plusieurs) ont des données à consommer.
+Pour résoudre le problème de multiplexage et de charge CPU, nous allons utiliser la fonction `poll` qui permet de scruter plusieurs descripteurs et de retourner quand un descripteur (ou plusieurs) ont des données à consommer.
 
-Lisez le manuel de la fonction `select` (`man 3 select`). En quelques mots, cette fonction nécessite qu'on lui passe des ensembles de descripteurs de fichiers, qu'elle renverra ensuite modifiés avec un marquage pour les descripteurs qui ont du contenu à lire (`select`  gère aussi l'écriture, mais nous ne le verrons pas ici).
+Lisez le manuel de la fonction `poll` (`man poll`). En quelques mots, cette fonction nécessite qu'on lui passe un tableau de structures de type `struct pollfd` contenant les descripteurs de fichiers à surveiller et les événements à surveiller.
 
-Son utilisation se fait en 3 temps (qui doivent être répétés dans la boucle de lecture) :
+```
+struct pollfd {
+	int fd; // descripteur de fichier, tel qu'obtenu par open()
+	short events; // Événements à surveiller
+	short revents; // Set by poll, événements à traiter
+};
+```
 
- - Initialisation des `fd_set` (les ensembles de descripteurs de fichiers)
- - Appel à `select` en lui passant les ensembles de descripteurs de fichiers
- - Après retour de `select`, parcours des ensembles de FD (_file descriptors_ pour descripteurs de fichiers) pour trouver lesquels ont des données à lire, et lecture effective des données en attente.
+Son utilisation se fait en 3 temps :
 
-**Remarque :** pour permettre le fonctionnement de `select`, vos fichiers devront être ouverts en mode `"r+"` sans quoi `select` retournera sans arrêt alors qu'il n'y a rien à lire.
+ - Initialisation des du tableau de `pollfd` (un élément par descripteur à surveiller).
+ - Appel à `poll` en lui passant le tableau.
+ - Après retour de `poll`, parcours du tableau pour trouver les descripteurs ayant des événements à traiter, et traitement des événements.
 
-#### Étape 1 : préparation des `fd_set`
+Les événements notables sont les suivants :
 
-Un ensemble de FD est de type `fd_set` et est manipulé grâce à des macros. Avant d'entrer dans la boucle, le `fd_set` doit être déclaré et initialisé.
+- POLLIN : indique que des données sont disponibles à la lecture
+- POLLOUT : indique qu'il est possible d'écrire dans le fichier
+- POLLHUP : indique une fermeture du descripteur (attention, la fermeture n'est effective que lorsque POLLHUP est le seul événement retourné)
+
+Les événements sont des flags dans un champ. On peut donc tester leur présence avec l'opérateur `&` (par exemple, `mes_fds[0].revents & POLLIN` sera vrai si POLLIN est actif).
+
+#### Étape 1 : préparation du tableau de `pollfd`s
+
+Il sera nécessaire de transmettre à `poll` un tableau contenant autant de `pollfd` que de descripteurs à surveiller.
 
 ```c
-fd_set read_fds;
+struct pollfd read_fds[2] = {
+	{ .fd=fifo1_desc, .events=POLLIN },
+	{ .fd=fifo2_desc, .events=POLLIN },
+};
 /*...*/
-while(1) {
-	FD_ZERO(&read_fds);
-	FD_SET(fifo1_desc, &read_fds);
-	FD_SET(fifo2_desc, &read_fds);
-	/**/
-}
 ```
 
-Cet extrait de code permet de déclarer le FD set, puis de le réinitialiser au début de la boucle, afin de lui réaffecter les descripteurs de fichiers sur `fifo1` et `fifo2`.
+Ce code déclare le tableau pour 2 `struct pollfd`, puis affecte les valeurs des descripteurs préalablement ouverts, ainsi que le type d'événements attendus (ici, POLLIN pour la lecture). En plus des événements demandés, `poll` est susceptible de toujours renvoyer `POLLHUP`, `POLLERR` et `POLLNVAL`.
 
-#### Étape 2 : appel de `select`
+#### Étape 2 : appel de `poll`
 
-La fonction `select` prend en premier paramètre la valeur du plus grand DF +1, en second paramètre un pointeur vers l'ensemble de FD en lecture (ici, `read_fds`), puis un pointeur vers le `fd_set` en écriture (ici, il sera `NULL`), puis un pointeur vers le `fd_set` des exceptions (aussi `NULL` dans notre cas), puis un pointeur vers une structure `timeval`. Cette structure définit à quel moment `select` retournera (avec comme valeur de retour `0`) même si rien n'a été lu sur les FD surveillés par `select`. On remarque que l'appel à `select` avec aucun descripteur à surveiller permet de faire un timer.
+La fonction `poll` 3 paramètres :
 
-Dans le cadre de notre TP, l'appel sera similaire à ceci :
+- le tableau de `struct pollfd`
+- le nombre d'éléments dans ce tableau
+- un timeout en millisecondes après lequel la fonction `poll` retourne, même si aucun événement n'a été détecté.
+
+Dans le cadre de notre exemple, l'appel sera similaire à ceci :
 
 ```c
-int max_fd = (fifo1_desc > fifo2_desc) ? fifo1_desc : fifo2_desc;
-struct timeval select_timeout = {.tv_sec=1, .tv_usec=0}; // timeout: 1 second, 0 µs
-int select_result = select(max_fd+1, &read_fds, NULL, NULL, &select_timeout);
-
-/* ... Do something with select results ... */
+int ready = poll(read_fds, 2, 1000);
+if (ready > 0) {
+	/* ... Do something with poll results ... */
+} // else: no result, only timeout
 ```
 
-#### Étape 3 : utilisation du résultat de `select`
+#### Étape 3 : utilisation du résultat de `poll`
 
-Il y a principalement 3 cas à vérifier concernant le résultat de `select` :
+`poll` est susceptible de retourner 3 types de valeurs :
 
- - La valeur de retour `-1` : `select` a généré une erreur, il est raisonnable de considérer à ce moment là que le programme doit être arrêté.
- - La valeur de retour `0` (uniquement si un timeout est passé en paramètre) : `select` n'a rien trouvé à lire sur ses descripteurs dans la durée du timeout. Il a donc retourné, mais aucun descripteur ne sera disponible à la lecture.
- - Une valeur `>0` : `select` a des données à lire sur un ou plusieurs descripteurs (un nombre égal à la valeur de retour). Il faut alors parcourir les `fd_set` et tester si les descripteurs qui y sont enregistrés sont "actifs", c'est-à-dire qu'ils ont des données en attente de lecture.
+ - La valeur de retour `-1` : `poll` a généré une erreur, dont le code est stocké dans `errno`.
+ - La valeur de retour `0`  : `poll` n'a rien trouvé à traiter sur ses descripteurs avant que le timeout soit échu. Il a donc retourné, mais aucun événements n'est à traiter.
+ - Une valeur `>0` : `poll` a des événements à traiter sur un ou plusieurs descripteurs (dont le nombre est égal à la valeur de retour). Il faut alors parcourir les `struct pollfd` et tester si les descripteurs qui y sont enregistrés sont "actifs", c'est-à-dire qu'ils ont des données en attente de lecture.
 
 Les deux premiers cas sont traités selon la logique de votre application. Pour le dernier cas, le traitement est généralement d'une forme similaire à ceci (basé sur le contexte de notre exemple) :
 
 ```c
-if (FD_ISSET(fifo1_desc, &reaf_fds)) // If FD has data available
-	if (read(fifo1_desc, buffer, BUFFER_SIZE) > 0) // Try to read
-		printf("%s", buffer); // You shall add a '\0' before printing since read doesn't do it
-if (FD_ISSET(fifo2_desc, &reaf_fds))
-	if (read(fifo2_desc, buffer, BUFFER_SIZE) > 0)
-		printf("%s", buffer); // You shall add a '\0' before printing since read doesn't do it
+for (int i=0; i<2; ++i) {
+	if (read_fds[i].revents & POLLIN) {
+		// Read and use data
+	} else { // POLLHUP only processed when alone!
+		close(read_fds[i].fd); // Closed by remote, so close on our side
+	}
+}
 ```
 
 Puis, on recommence la boucle, jusqu'à son interruption par une condition particulière ou un signal.
 
-À l'aide des instructions ci-dessus, faites en sorte d'écrire un programme nommé `multiplexage-select.c` qui utilise `select` pour multiplexer les lectures sur des FIFO. Vous pouvez ajouter des FIFO, tester de les alimenter dans n'importe quel ordre, etc. Regardez également la consommation CPU de votre programme.
+À l'aide des instructions ci-dessus, faites en sorte d'écrire un programme nommé `multiplexage-poll.c` qui utilise `poll` pour multiplexer les lectures sur des FIFO. Vous pouvez ajouter des FIFO, tester de les alimenter dans n'importe quel ordre, etc. Regardez également la consommation CPU de votre programme.
 
 ## Conclusion
 
-Dans ce TP, vous avez vu tout d'abord comment communiquer entre le système et vos programmes. Puis, vous avez vu deux manières de multiplexer des lectures de données dans un programme en C (il en existe d'autres). La fonction `select` est aussi utilisable pour la lecture sur l'entrée standard (le descripteur de filchier étant `stdin`), ainsi que sur les _sockets_, qui sont une API de communication réseau. Cette API est d'ailleurs abordée dans une UV de la filière réseau de la formation en informatique de l'UTBM.
+Dans ce TP, vous avez vu tout d'abord comment communiquer entre le système et vos programmes. Puis, vous avez vu deux manières de multiplexer des lectures de données dans un programme en C (il en existe d'autres). La fonction `poll` est aussi utilisable pour la lecture sur l'entrée standard (le descripteur de filchier étant `stdin`), ainsi que sur les _sockets_, qui sont une API de communication réseau. Cette API est d'ailleurs abordée dans une UV de la filière réseau de la formation en informatique sous statut étudiant de l'UTBM.
